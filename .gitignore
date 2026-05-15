@@ -1,0 +1,25 @@
+# LaTeX build artifacts
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc
+docs/*.synctex.gz
+docs/*.fls
+docs/*.fdb_latexmk
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Arduino / PlatformIO build
+build/
+.pio/
+*.bin
+*.elf
+
+# OS
+Thumbs.db
+.DS_Store
+~$*
