@@ -1,154 +1,134 @@
 % SunSand IoT Monitor
 % [FILL IN: team member names + IDs]
-% Microprocessor Course — Project Discussion · 2026-05-17
+% Microprocessor Course — Project Discussion · 2026-05-18
 
 # Project concept
 
-- Project idea **#4 — IoT Environmental Monitor**, extended.
-- Instead of one board: **two LoRa sensor nodes + a gateway** (three ESP32s).
-- Nodes read sensors → transmit over **433 MHz LoRa** → gateway → **USB serial** → live laptop dashboard.
-- Demonstrates: I²C, 1-wire digital, GPIO, SPI+RF, UART-to-host, and an explicit finite-state-machine firmware on every board.
+- Project idea **#4 — IoT Environmental Monitor**, extended end to end.
+- A **bidirectional LoRa link** + a **WiFi-to-cloud dashboard on AWS**.
+- Node reads sensors → safety rule → 433 MHz LoRa → gateway → WiFi/HTTP → AWS Flask → live web dashboard at `iot.gabr.online:8080`.
+- Demonstrates: 1-wire digital, ADC, GPIO, SPI+RF, half-duplex bidirectional radio, ESP32 WiFi + HTTP client, token-secured cloud API, FSM firmware with an EVAL/ALARM branch.
 
 # Individual contributions
 
 | Member | Contribution |
 |---|---|
-| [FILL IN: name 1] | [e.g. Node A firmware + sensor wiring + testing] |
-| [FILL IN: name 2] | [e.g. Node B firmware + alarm logic + buzzer] |
-| [FILL IN: name 3] | [e.g. Gateway firmware + LoRa bring-up] |
-| [FILL IN: name 4] | [e.g. Dashboard + report + presentation] |
+| [FILL IN: name 1] | [e.g. Node A firmware + sensors + the EVAL/ALARM rule] |
+| [FILL IN: name 2] | [e.g. gateway firmware + the bidirectional ACK] |
+| [FILL IN: name 3] | [e.g. WiFi + cloud service + AWS deployment] |
+| [FILL IN: name 4] | [e.g. dashboard + report + presentation] |
 
 *(Replace every [FILL IN] before presenting.)*
 
 # System block diagram
 
 ```
- [Node A]  Weather       \
-  DHT22 + BH1750           \  LoRa 433 MHz
-                            >--->  [Gateway]  --USB serial-->  [Laptop]
- [Node B]  Env./Security   /       ESP32+LoRa     JSON lines    dashboard
-  DHT22 + PIR + reed      /        (no sensors)
-  + buzzer (alarm)
+ [Node A]  --LoRa data-->  [Gateway]  --WiFi/HTTP-->  [AWS EC2]  --> browser
+  DHT22 + photoresistor     ESP32+LoRa                 Flask :8080  iot.gabr.online
+  (EVAL/ALARM bonus)  <--LoRa ACK--  + WiFi            (token-gated)
 ```
 
-- Nodes are transmit-only; gateway is RX on radio, TX on USB.
-- No WiFi / broker in the room → rock-solid demo.
-- *(Vector version of every diagram is in the report PDF.)*
+- LoRa hop is **bidirectional** (gateway ACKs every packet, node confirms).
+- WiFi is a **non-fatal added stage** — lose it and the link still LoRa-ACKs + prints to USB.
+- *(Vector diagrams are in the report PDF.)*
 
 # Sensors used
 
 | Component | Interface | Role |
 |---|---|---|
-| ESP32-WROOM ×3 | — | MCU for each node + gateway |
-| LoRa Ra-01 (SX1278) ×3 | SPI | 433 MHz radio |
-| DHT22 ×2 | 1-wire digital | Temp + humidity |
-| BH1750 ×1 | I²C | Light (lux), Node A |
-| HC-SR501 PIR ×1 | GPIO | Motion, Node B |
-| Reed switch ×1 | GPIO | Door open/closed, Node B |
-| Active buzzer ×1 | GPIO | Alarm, Node B (bonus) |
+| ESP32-WROOM ×2 | — | MCU for node + gateway |
+| LoRa Ra-01 (SX1278) ×2 | SPI | 433 MHz radio (both boards) |
+| DHT22 ×1 | 1-wire digital | Temp + humidity, Node A |
+| Photoresistor ×1 | Analog (ADC) | Light / day-night, Node A |
 
-# Circuit schematic (Node B shown)
+# Circuit schematic (Node A)
 
 ```
-            +-----------+ GPIO4   DHT22
-            |           |-------- (temp/hum)
-   Ra-01 ---|  ESP32    | GPIO34  HC-SR501 PIR
-   (SPI)    |  Node B   | GPIO32  Reed switch (INPUT_PULLUP -> GND)
-            |           | GPIO25  Buzzer
+            +-----------+ GPIO4   DHT22 (temp/hum, 1-wire)
+   Ra-01 ---|  ESP32    |
+   (SPI)    |  Node A   | GPIO34  Photoresistor AO (ADC1)
             +-----------+
 ```
 
-- Ra-01 powered at **3.3 V** (never 5 V) + 100 nF decoupling.
-- LoRa SPI bus: SCK 18 / MISO 19 / MOSI 23, NSS 5 / RST 27 / DIO0 26.
-- Node A swaps PIR/reed/buzzer for a BH1750 on I²C (SDA 21, SCL 22).
+- Ra-01 at **3.3 V** (never 5 V) + 100 nF + ~17 cm antenna wire.
+- LoRa SPI: SCK 18 / MISO 19 / MOSI 23, NSS 5 / RST 27 / DIO0 26.
+- Gateway = same ESP32 + Ra-01, no sensors.
 
-# State machine — the firmware architecture
-
-Every board = one `enum` of states + a `switch` in `loop()`. One `case` = one state. Direct 1:1 mapping to the diagram.
+# State machine — Node A (bonus + ACK)
 
 ```
- Node:    INIT -> READ -> BUILD -> SEND -> WAIT -.
-            \      \_ read fail _.                 \_ period _.
-             \_ init fail _.      v                            v
-                            ERROR <----------------------------'
-                              \_ retry _-> INIT
+ INIT -> READ -> EVAL --(hot|dark&humid)--> ALARM --.
+                   \                                  \ alarm=1
+                    \--(safe)--> BUILD <--------------'
+                                   |
+        WAIT <- WAITACK <- SEND <--'   (WAITACK listens ~600ms for ACK)
 ```
 
-# State machine — Node B (the bonus branch)
+- **ALARM** is a real extra state (overheat OR dark+humid).
+- **WAITACK** flips the radio to RX and confirms the gateway's `ACK,<seq>`.
+
+# State machine — Gateway (bridge)
 
 ```
- INIT -> READ -> EVAL --(motion & door open)--> ALARM --.
-                   \                                      \  buzzer on
-                    \--(safe)----------------> BUILD <-----'  alarm=1
-                                                 |
-                                       SEND <----'--> WAIT --> READ
+ INIT(LoRa+WiFi) -> LISTEN --(packet)--> PARSE -> EMIT -> LISTEN
+                       \--(5s)--> STATUS --^
+ EMIT = (1) LoRa ACK back  (2) USB print  (3) WiFi HTTP POST
 ```
 
-- **ALARM is a real extra state**, not just an `if`.
-- In ALARM the node re-evaluates every 0.5 s (vs 3 s) so the buzzer clears fast.
+- ACK is sent **before** the POST — a slow hotspot can't break the round-trip.
+- WiFi non-fatal: join fails → still ACK + USB, retry on heartbeat.
 
-# Key code — the state machine skeleton
+# Key code — the bonus safety rule
 
 ```c
-enum State { S_INIT, S_READ, S_BUILD, S_SEND, S_WAIT, S_ERROR };
-State state = S_INIT;
-void loop() {
-  switch (state) {
-    case S_INIT:  /* bring up sensors + radio */        break;
-    case S_READ:  /* sample; bad read -> S_ERROR */     break;
-    case S_BUILD: /* snprintf the CSV payload */        break;
-    case S_SEND:  /* LoRa transmit (or USB fallback) */ break;
-    case S_WAIT:  /* hold for the sense period */       break;
-    case S_ERROR: /* delay, retry -> S_INIT */          break;
-  }
-}
+bool hot = (tempC >= TEMP_HOT_C);
+bool condensation = (night == 1 && humPct >= HUM_HIGH_PCT);
+state = (hot || condensation) ? S_ALARM : S_BUILD;
 ```
 
-# Key code — the bonus security rule
+# Key code — bidirectional ACK
 
 ```c
-case S_EVAL:
-  if (pir == 1 && doorOpen == 1) state = S_ALARM;     // intrusion
-  else { alarm = 0; digitalWrite(BUZZER,LOW); state = S_BUILD; }
-  break;
-case S_ALARM:
-  alarm = 1; digitalWrite(BUZZER, HIGH);              // sound it
-  state = S_BUILD;                                    // still report
-  break;
+// gateway, on each received packet:
+sendAck(seq);          // LoRa TX back to node (fast, first)
+Serial.println(out);   // local debug
+cloudPost(out);        // WiFi HTTP POST (may block; done last)
+// node, WAITACK:
+if (strncmp(rx,"ACK,",4)==0 && strtoul(rx+4,0,10)==sentSeq) ackOk=1;
 ```
 
-# Code structure
+# Cloud deployment
 
-- `firmware/common/protocol.h` — LoRa params, pin map, node IDs, packet schema, `USE_LORA` switch.
-- `firmware/node_a` / `node_b` / `gateway` — the three sketches (one state machine each).
-- `dashboard/dashboard.py` — Flask + pyserial live web dashboard, `--fake` mode for hardware-free testing.
-
-**Design decision:** compact **CSV on the radio** (tiny packet, no JSON lib on the nodes) → JSON built once **on the gateway** for the dashboard.
+- Flask `cloud_app.py` as a **systemd service** on AWS EC2, **port 8080**, own venv.
+- Co-tenant box runs an unrelated service on 80/443 — **isolated by port**, untouched.
+- One SG rule opens 8080; ingest gated by an **X-Token** secret.
+- Route 53 → `iot.gabr.online`. Token + WiFi creds **gitignored** (`secrets.h`).
 
 # Additional features (bonus marks)
 
-1. **Intrusion alarm state** — motion + door-open → buzzer + flagged packet.
-2. **Gateway link-stats heartbeat** — per-node packet counts + RSSI every 5 s → offline detection + packet-loss measurement.
-3. **Hardware-independent demo path** — `USE_LORA 0` sends straight to USB if a radio fails on the day; same dashboard.
-4. **Self-healing firmware** — any fault routes to ERROR and auto-retries instead of freezing.
-5. **Live styled web dashboard** — online/offline per node, animated alarm banner, projector-ready.
+1. **Bidirectional LoRa** — gateway ACKs, node confirms; ACK before cloud POST.
+2. **WiFi cloud uplink** — token-secured AWS dashboard reachable anywhere.
+3. **Environment-safety ALARM state** — overheat / dark+humid; LDR participates.
+4. **Self-healing + graceful degradation** — faults retry; WiFi loss ≠ outage.
+5. **Hardware-independent demo path** — `USE_LORA 0` → straight to USB.
+6. **Secrets hygiene** — no credentials in committed code.
 
 # Testing
 
-- Dashboard verified hardware-free via `--fake`: page renders, `/data` valid, counters advance, alarm banner toggles. **Pass.**
-- Each board prints a boot banner; INIT reports per-subsystem OK; faults auto-retry.
-- Packet `seq` counter + gateway counts → packet-loss visible.
-- [FILL IN: real-hardware sensor sanity + measured RSSI at demo distance]
+- Cloud: no/bad token → 403, good token → 204, packet shows in `/data`. **Pass.**
+- WiFi: 2.4 GHz scan found hotspot −30..−45 dBm; gateway joined (172.20.10.x), POST 204. **Pass.**
+- Dashboard `--fake`: renders, counters advance, day/night + alarm toggle. **Pass.**
+- [FILL IN: real-hardware RSSI at demo distance + sensor sanity ticks]
 
 # Demo video
 
 - [EMBED OR LINK the recorded demo video here.]
-- Shows: power on gateway → dashboard "online", power node B → live temp/hum, wave hand → motion, open "door" magnet → alarm banner + buzzer, power node A → light reading reacts to a torch.
+- Power gateway → `# WiFi OK`; power Node A → dashboard ONLINE + `ACK ok` on node serial; cover LDR → NIGHT; warm DHT22 → **ENVIRONMENT ALARM** banner; remove → clears.
 
 # Conclusion
 
-- Met brief (idea #4), extended to a real wireless sensor network.
-- Clean FSM firmware, documented protocol, live dashboard, 5 bonus features.
-- Future: return path (gateway→node), swap USB for WiFi/MQTT, more nodes (protocol already namespaces by node ID).
+- Met brief (idea #4); extended to a bidirectional link + cloud dashboard with an on-board safety state.
+- Clean FSM firmware, documented protocol, secrets hygiene, 6 bonus features.
+- Future: TLS on the uplink, gateway→node command path on the ACK channel, more nodes (protocol namespaces by node ID).
 
 **Thank you — questions?**

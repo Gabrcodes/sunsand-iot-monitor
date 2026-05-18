@@ -1,54 +1,44 @@
 #!/usr/bin/env python3
 """
-SunSand IoT monitor -- laptop dashboard.
+SunSand IoT monitor -- cloud dashboard (runs on the EC2 box, port 8080).
 
-Reads the gateway's USB-serial output (one JSON object per line) and
-serves a live web dashboard. Each line is one of:
+The LoRa gateway joins WiFi and HTTP-POSTs one JSON object per packet to
+/ingest (token-gated). This service folds those into live state and
+serves the same dashboard page the local serial version does.
 
-    {"node":"A","seq":..,"temp":..,"hum":..,"light":..,"rssi":..,...}
-    {"node":"GW","a_count":..,"a_rssi":..,"a_age_ms":..,"uptime_ms":..}
+    POST /ingest   header X-Token: <SECRET>   body: one JSON telemetry obj
+    GET  /         the live dashboard
+    GET  /data     JSON snapshot (browser polls this)
 
-Usage
------
-    # real hardware: gateway plugged into COM5 (Windows) or /dev/ttyUSB0
-    python dashboard.py --port COM5
-
-    # no hardware yet: synthesise packets so the dashboard can be tested
-    python dashboard.py --fake
-
-Then open http://127.0.0.1:8000 in a browser.
-
-Dependencies:  pip install flask pyserial   (see requirements.txt)
+Run:  SUNSAND_TOKEN=... python3 cloud_app.py   (listens on 0.0.0.0:8080)
 """
-import argparse
 import json
+import os
 import threading
 import time
-import random
 from collections import deque
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 
-# --------------------------------------------------------------------------
-# Shared, thread-safe state. The reader thread writes it; Flask reads it.
-# --------------------------------------------------------------------------
+SECRET = os.environ.get("SUNSAND_TOKEN", "change-me")
+PORT = int(os.environ.get("SUNSAND_PORT", "8080"))
+
 LOCK = threading.Lock()
 STATE = {
     "A": {"online": False, "last": None, "hist": deque(maxlen=120)},
     "GW": {"last": None},
 }
-OFFLINE_AFTER_S = 12  # ~4 missed 3-second packets => treat node as offline
+OFFLINE_AFTER_S = 12
 
 
 def ingest(line: str) -> None:
-    """Parse one serial line and fold it into STATE."""
     line = line.strip()
     if not line or line.startswith("#"):
-        return  # gateway debug/comment lines
+        return
     try:
         msg = json.loads(line)
     except ValueError:
-        return  # not a JSON telemetry line; ignore
+        return
     node = msg.get("node")
     now = time.time()
     with LOCK:
@@ -64,58 +54,6 @@ def ingest(line: str) -> None:
             STATE["GW"]["last_rx"] = now
 
 
-# --------------------------------------------------------------------------
-# Serial reader (real hardware)
-# --------------------------------------------------------------------------
-def serial_reader(port: str, baud: int) -> None:
-    import serial  # pyserial; imported here so --fake needs no pyserial
-
-    while True:
-        try:
-            with serial.Serial(port, baud, timeout=2) as ser:
-                print(f"[dashboard] reading {port} @ {baud}")
-                while True:
-                    raw = ser.readline().decode("utf-8", "replace")
-                    if raw:
-                        ingest(raw)
-        except Exception as exc:  # port unplugged, wrong COM, etc.
-            print(f"[dashboard] serial error: {exc}; retrying in 3 s")
-            time.sleep(3)
-
-
-# --------------------------------------------------------------------------
-# Fake reader (no hardware -- for testing the dashboard + the demo video)
-# --------------------------------------------------------------------------
-def fake_reader() -> None:
-    print("[dashboard] FAKE mode: synthesising telemetry")
-    a_seq = 0
-    t = 24.0
-    while True:
-        t += random.uniform(-0.3, 0.3)
-        light = int(1800 + random.uniform(-600, 1600))
-        nyt = 1 if light >= 2400 else 0
-        hum = round(45 + random.uniform(-3, 3), 1)
-        alarm = 1 if (t >= 38.0 or (nyt and hum >= 80.0)) else 0
-        ingest(json.dumps({
-            "node": "A", "seq": a_seq, "temp": round(t, 1),
-            "hum": hum, "light": light, "night": nyt, "alarm": alarm,
-            "rssi": random.randint(-80, -55),
-            "snr": round(random.uniform(7, 11), 1),
-            "t_ms": int(time.time() * 1000) % 10_000_000,
-        }))
-        a_seq += 1
-        ingest(json.dumps({
-            "node": "GW", "a_count": a_seq,
-            "a_rssi": random.randint(-80, -55),
-            "a_age_ms": 0,
-            "uptime_ms": int(time.time() * 1000) % 100_000_000,
-        }))
-        time.sleep(3)
-
-
-# --------------------------------------------------------------------------
-# Web app
-# --------------------------------------------------------------------------
 app = Flask(__name__)
 
 PAGE = r"""
@@ -157,7 +95,7 @@ PAGE = r"""
 </style></head><body>
 <header>
   <div><h1>SunSand IoT Monitor</h1>
-  <div class="sub">LoRa sensor node &rarr; gateway &rarr; this dashboard</div></div>
+  <div class="sub">Node A &rarr; LoRa &rarr; gateway &rarr; WiFi &rarr; this cloud dashboard</div></div>
   <div class="sub" id="clock"></div>
 </header>
 
@@ -225,27 +163,20 @@ def data():
     return jsonify(out)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="SunSand IoT dashboard")
-    ap.add_argument("--port", help="serial port of the gateway (e.g. COM5)")
-    ap.add_argument("--baud", type=int, default=115200)
-    ap.add_argument("--fake", action="store_true",
-                    help="synthesise telemetry instead of reading serial")
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--web-port", type=int, default=8000)
-    args = ap.parse_args()
+@app.route("/ingest", methods=["POST"])
+def ingest_route():
+    if request.headers.get("X-Token", "") != SECRET:
+        return ("forbidden", 403)
+    body = request.get_data(as_text=True) or ""
+    for line in body.splitlines() or [body]:
+        ingest(line)
+    return ("", 204)
 
-    if args.fake:
-        threading.Thread(target=fake_reader, daemon=True).start()
-    elif args.port:
-        threading.Thread(target=serial_reader,
-                         args=(args.port, args.baud), daemon=True).start()
-    else:
-        ap.error("give --port COMx for hardware, or --fake to test")
 
-    print(f"[dashboard] open http://{args.host}:{args.web_port}")
-    app.run(host=args.host, port=args.web_port, threaded=True)
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=PORT, threaded=True)

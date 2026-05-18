@@ -1,110 +1,119 @@
 # SunSand IoT Monitor
 
-Microprocessor course project — a two-node **LoRa wireless sensor system**
-with a live laptop dashboard. Project idea #4 (IoT Environmental Monitor),
-extended from one board to three.
+Microprocessor course project — a **bidirectional LoRa sensor link** that
+bridges over WiFi to a **cloud dashboard on AWS**. Project idea #4 (IoT
+Environmental Monitor), extended end to end.
 
 ```
- [Node A] Weather        \
-  ESP32 + DHT22 + BH1750   \   LoRa 433 MHz
-                            >-->  [Gateway]  --USB serial-->  [Laptop]
- [Node B] Env./Security    /      ESP32 + LoRa    JSON lines   dashboard
-  ESP32 + DHT22 + PIR      /       (no sensors)
-  + reed switch + buzzer
+ [Node A]  --LoRa data-->  [Gateway]  --WiFi/HTTP-->  [AWS EC2]  -->  browser
+  ESP32 + DHT22 +          ESP32 + LoRa                Flask :8080   iot.gabr.online
+  photoresistor   <--LoRa ACK--  + WiFi               (token-gated)
+  (EVAL/ALARM bonus)
 ```
 
-Two ESP32 sensor nodes read their sensors every 3 s, send a compact CSV
-packet over a 433 MHz LoRa radio link to a third ESP32 (the gateway).
-The gateway attaches link quality and prints one JSON line per packet
-over USB serial. A Python/Flask dashboard on the laptop reads that
-serial stream and shows the data live in a browser.
+Node A reads its sensors every 3 s, runs an environment-safety rule, and
+transmits over 433 MHz LoRa. The gateway ACKs every packet back over
+LoRa (bidirectional link), then HTTP-POSTs the JSON over WiFi to a
+token-gated Flask service on an AWS EC2 box, which serves a live
+dashboard at `http://iot.gabr.online:8080/`. The LoRa link keeps working
+(with USB output + ACKs) even if WiFi/internet is down.
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `firmware/common/protocol.h` | Shared constants: LoRa parameters, pin map, node IDs, packet schema, `USE_LORA` transport switch. |
-| `firmware/node_a/` | Node A sketch — DHT22 + BH1750 → LoRa. |
-| `firmware/node_b/` | Node B sketch — DHT22 + PIR + reed + buzzer → LoRa, with the alarm state. |
-| `firmware/gateway/` | Gateway sketch — LoRa RX → JSON over USB serial + link-stats heartbeat. |
-| `dashboard/dashboard.py` | Laptop dashboard (Flask + pyserial). `--fake` mode for hardware-free testing. |
-| `docs/report.tex` / `report.pdf` | Final report (design, implementation, testing, contributions). |
+| `firmware/common/protocol.h` | LoRa params, pin map, node ID, packet schema, `USE_LORA` switch. |
+| `firmware/node_a/` | Node A — DHT22 + photoresistor → LoRa, EVAL/ALARM bonus, listens for the ACK. |
+| `firmware/gateway/` | Gateway — LoRa RX → LoRa ACK → USB + WiFi HTTP POST + link-stats heartbeat. |
+| `firmware/gateway/secrets.example.h` | Template for WiFi creds + cloud token. Copy to `secrets.h` (gitignored). |
+| `firmware/diag_wifiscan/` | Throwaway: dumps visible 2.4 GHz WiFi (used to debug the join). |
+| `dashboard/cloud_app.py` | AWS Flask service: token-gated `/ingest`, live dashboard, `/data`. |
+| `dashboard/dashboard.py` | Local serial fallback dashboard, `--fake` mode for hardware-free testing. |
+| `docs/report.tex` / `report.pdf` | Final report. |
 | `docs/slides.md` / `slides.pptx` | Discussion PowerPoint. |
-| `docs/DEMO_VIDEO.md` | Shot list / script for recording the demonstration video. |
+| `docs/DEMO_VIDEO.md` | Shot list for the demonstration video. |
 
 ## Hardware
 
-3× ESP32-WROOM DevKit, 3× LoRa Ra-01 (SX1278, 433 MHz), 2× DHT22,
-1× BH1750, 1× HC-SR501 PIR, 1× reed switch + magnet, 1× active buzzer,
-breadboards + jumpers, 100 nF caps. Pin assignments are in
-`firmware/common/protocol.h` and in the report.
+2× ESP32-WROOM DevKit, 2× LoRa Ra-01 (SX1278, 433 MHz), 1× DHT22,
+1× analog photoresistor module, ~17 cm wire antennas, breadboards +
+jumpers, 100 nF caps. Pin map in `firmware/common/protocol.h`.
 
-> The Ra-01 is a **3.3 V** part — power it from the ESP32's 3V3 pin,
-> never 5 V. 100 nF ceramic across its VCC–GND.
+> The Ra-01 is a **3.3 V** part — power from the ESP32's 3V3 pin, never
+> 5 V, 100 nF across VCC–GND. Both Ra-01s need a ~17 cm antenna wire.
+> The ESP32-WROOM is **2.4 GHz only** — a 5 GHz hotspot won't be seen.
 
-## Building the firmware (Arduino IDE)
+## Secrets
 
-1. Install the **ESP32 board package**: Boards Manager → search "esp32"
-   (Espressif Systems) → install. Select board *ESP32 Dev Module*.
-2. Install these libraries (Library Manager):
-   - **LoRa** by Sandeep Mistry
-   - **DHT sensor library** by Adafruit (+ **Adafruit Unified Sensor**)
-   - **BH1750** by Christopher Laws
-3. Open `firmware/node_a/node_a.ino` (and `node_b`, `gateway`),
-   select the right COM port, and Upload — one sketch per board.
-
-Each sketch folder already contains its own copy of `protocol.h`
-so the Arduino IDE finds it with no path setup.
-
-**Fallback (no LoRa):** set `#define USE_LORA 0` in a node's
-`protocol.h` and the node prints its CSV straight to USB instead of
-transmitting — the dashboard reads it identically. Use this if a radio
-module fails on demo day.
-
-## Running the dashboard
+Real WiFi credentials and the cloud ingest token are **not** in the
+repo. Before building the gateway:
 
 ```bash
-cd dashboard
-pip install -r requirements.txt
-
-# real hardware: gateway plugged into COM5 (Windows) / /dev/ttyUSB0 (Linux)
-python dashboard.py --port COM5
-
-# no hardware yet — synthesise telemetry to test the dashboard
-python dashboard.py --fake
+cp firmware/gateway/secrets.example.h firmware/gateway/secrets.h
+# then edit secrets.h with the real SSID / password / URL / token
 ```
 
-Then open <http://127.0.0.1:8000>.
+`secrets.h` is gitignored. iOS hotspot SSIDs use a typographic
+apostrophe `’` (U+2019), not `'` — paste the exact character or the
+join silently fails.
+
+## Building the firmware (Arduino IDE or arduino-cli)
+
+1. Install the **ESP32 board package** (Boards Manager URL:
+   `https://espressif.github.io/arduino-esp32/package_esp32_index.json`).
+2. Libraries: **LoRa** (Sandeep Mistry), **DHT sensor library**
+   (Adafruit) + **Adafruit Unified Sensor**. WiFi/HTTPClient ship with
+   the ESP32 core.
+3. Flash `firmware/node_a` and `firmware/gateway` to the two boards
+   (FQBN `esp32:esp32:esp32`), one sketch per board.
+
+**Fallback:** set `#define USE_LORA 0` in a board's `protocol.h` to
+stream CSV straight to USB if a radio fails on demo day.
+
+## Cloud (already deployed)
+
+`cloud_app.py` runs as a systemd service on an AWS EC2 box, port 8080,
+in its own venv, gated by an `X-Token` header (token via systemd env
+var). A Route 53 record maps `iot.gabr.online`. It is isolated by port
+from the unrelated service on that box. Open
+`http://iot.gabr.online:8080/` to view it.
+
+Local alternative without the cloud:
+
+```bash
+cd dashboard && pip install -r requirements.txt
+python dashboard.py --port COM5     # gateway on USB
+python dashboard.py --fake          # no hardware
+```
 
 ## Demo procedure (also the video script)
 
-1. Start the dashboard. Power the **gateway** (USB) — it prints
-   `gateway init OK`.
-2. Power **Node B**. Within ~10 s the dashboard shows Node B ONLINE
-   with live temperature/humidity.
-3. Wave a hand in front of the PIR → `Motion: YES`. Move the magnet
-   away from the reed switch → `Door: OPEN`. Do both at once → the
-   **intrusion alarm banner** appears and the buzzer sounds.
-4. Power **Node A**. Node A appears ONLINE; shine a phone torch at the
-   BH1750 → the light value jumps.
-5. Show the gateway link-stats strip (per-node packet counts + RSSI).
-
-See `docs/DEMO_VIDEO.md` for the full shot list.
+1. Start the AWS dashboard URL in a browser; power the **gateway**
+   (it joins WiFi, prints `# WiFi OK`).
+2. Power **Node A**; within ~10 s the dashboard shows it ONLINE with
+   live temp/humidity/light and a day/night badge; Node A's serial
+   prints `ACK ok seq=N` (the bidirectional link).
+3. Cover the photoresistor → light drops, badge flips to **NIGHT**.
+4. Warm the DHT22 past the overheat threshold (or cover the LDR and
+   breathe on it) → the **ENVIRONMENT ALARM** banner pulses on the
+   cloud dashboard; remove the hazard → it clears.
+5. Show the gateway link-stats strip (packet count + RSSI).
 
 ## Deliverables checklist
 
 - [x] Microcontroller code — `firmware/`
+- [x] Cloud service + dashboard — `dashboard/cloud_app.py` (deployed)
 - [x] Final report — `docs/report.pdf`
 - [x] Discussion PowerPoint — `docs/slides.pptx`
 - [ ] Demonstration video — record per `docs/DEMO_VIDEO.md`
-- [ ] Fill in team names/IDs + contributions + real-hardware test results
-      (search the report and slides for `FILL IN`)
+- [ ] Fill in team names/IDs + contributions + real-hardware test rows
+      (search the report/slides for `FILL IN`)
 
-## Design note
+## Design notes
 
-The radio payload is compact CSV (`A,12,24.5,45.0,320.0`), not JSON —
-that keeps each packet tiny and means the constrained nodes never need
-a JSON library. JSON is built once, on the gateway, where it is
-convenient for the dashboard. Every board's firmware is a single
-explicit finite state machine, so the code maps 1:1 onto the state
-diagrams in the report.
+Compact CSV on the radio (no JSON lib on the node); JSON built once on
+the gateway. The LoRa ACK is sent **before** the WiFi POST so the
+node's round-trip stays tight even on a slow hotspot. WiFi is a
+non-fatal added stage — losing it degrades to LoRa-ACK + USB, not an
+outage. Every board's firmware is one explicit finite state machine
+mapping 1:1 onto the diagrams in the report.

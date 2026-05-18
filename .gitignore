@@ -23,3 +23,7 @@ build/
 Thumbs.db
 .DS_Store
 ~$*
+
+# Secrets -- real WiFi creds + cloud ingest token live here, never commit.
+# Copy secrets.example.h -> secrets.h and fill in real values to build.
+firmware/gateway/secrets.h
